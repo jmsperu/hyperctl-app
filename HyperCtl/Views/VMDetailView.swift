@@ -39,6 +39,16 @@ struct VMDetailView: View {
 
             Divider()
 
+            if isLoadingDetails {
+                VStack(spacing: 12) {
+                    ProgressView()
+                        .controlSize(.large)
+                    Text("Loading VM details...")
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     // Info cards

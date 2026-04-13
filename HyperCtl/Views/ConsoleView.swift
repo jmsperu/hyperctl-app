@@ -27,13 +27,80 @@ struct WebConsoleView: NSViewRepresentable {
 
     class Coordinator: NSObject, WKNavigationDelegate {
         func webView(_ webView: WKWebView, didReceive challenge: URLAuthenticationChallenge, completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
-            // Accept self-signed certs for console
             if challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
                let trust = challenge.protectionSpace.serverTrust {
                 completionHandler(.useCredential, URLCredential(trust: trust))
             } else {
                 completionHandler(.performDefaultHandling, nil)
             }
+        }
+    }
+}
+
+// MARK: - Interactive Terminal Text View
+
+class InteractiveTextView: NSTextView {
+    var inputHandler: ((String) -> Void)?
+
+    override func keyDown(with event: NSEvent) {
+        if event.modifierFlags.contains(.control), let chars = event.charactersIgnoringModifiers {
+            for ch in chars.unicodeScalars {
+                let code = ch.value
+                if code >= 0x61 && code <= 0x7A {
+                    let ctrlChar = String(UnicodeScalar(code - 0x60)!)
+                    inputHandler?(ctrlChar)
+                    return
+                }
+            }
+        }
+        if let chars = event.characters, !chars.isEmpty {
+            inputHandler?(chars)
+        } else {
+            interpretKeyEvents([event])
+        }
+    }
+
+    override func insertText(_ string: Any, replacementRange: NSRange) {
+        if let str = string as? String {
+            inputHandler?(str)
+        }
+    }
+
+    override func insertNewline(_ sender: Any?) {
+        inputHandler?("\n")
+    }
+
+    override func insertTab(_ sender: Any?) {
+        inputHandler?("\t")
+    }
+
+    override func deleteBackward(_ sender: Any?) {
+        inputHandler?("\u{7f}")
+    }
+
+    override func moveUp(_ sender: Any?) {
+        inputHandler?("\u{1b}[A")
+    }
+
+    override func moveDown(_ sender: Any?) {
+        inputHandler?("\u{1b}[B")
+    }
+
+    override func moveRight(_ sender: Any?) {
+        inputHandler?("\u{1b}[C")
+    }
+
+    override func moveLeft(_ sender: Any?) {
+        inputHandler?("\u{1b}[D")
+    }
+
+    override func cancelOperation(_ sender: Any?) {
+        inputHandler?("\u{03}")
+    }
+
+    override func paste(_ sender: Any?) {
+        if let str = NSPasteboard.general.string(forType: .string) {
+            inputHandler?(str)
         }
     }
 }
@@ -50,37 +117,63 @@ struct SSHTerminalView: NSViewRepresentable {
     func makeNSView(context: Context) -> NSScrollView {
         let scrollView = NSScrollView()
         scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = false
         scrollView.autoresizingMask = [.width, .height]
         scrollView.borderType = .noBorder
+        scrollView.drawsBackground = true
+        scrollView.backgroundColor = NSColor(red: 0.1, green: 0.1, blue: 0.12, alpha: 1.0)
 
-        let textView = NSTextView()
-        textView.isEditable = false
+        let contentSize = scrollView.contentSize
+
+        let textContainer = NSTextContainer(size: NSSize(width: contentSize.width, height: CGFloat.greatestFiniteMagnitude))
+        textContainer.widthTracksTextView = true
+        textContainer.lineFragmentPadding = 4
+
+        let layoutManager = NSLayoutManager()
+        layoutManager.addTextContainer(textContainer)
+
+        let textStorage = NSTextStorage()
+        textStorage.addLayoutManager(layoutManager)
+
+        let textView = InteractiveTextView(frame: NSRect(origin: .zero, size: contentSize), textContainer: textContainer)
+        textView.isEditable = true
         textView.isSelectable = true
         textView.backgroundColor = NSColor(red: 0.1, green: 0.1, blue: 0.12, alpha: 1.0)
+        textView.insertionPointColor = .white
         textView.textColor = .white
         textView.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
         textView.isAutomaticTextReplacementEnabled = false
-        textView.autoresizingMask = [.width]
+        textView.isAutomaticSpellingCorrectionEnabled = false
+        textView.isAutomaticTextCompletionEnabled = false
+        textView.isRichText = false
+        textView.allowsUndo = false
         textView.isVerticallyResizable = true
         textView.isHorizontallyResizable = false
-        textView.textContainer?.widthTracksTextView = true
-        textView.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
+        textView.autoresizingMask = [.width]
+        textView.textContainerInset = NSSize(width: 4, height: 4)
+        textView.minSize = NSSize(width: 0, height: contentSize.height)
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
 
         scrollView.documentView = textView
 
         context.coordinator.textView = textView
+        textView.inputHandler = { [weak coordinator = context.coordinator] text in
+            coordinator?.sendInput(text)
+        }
         context.coordinator.startSSH(host: host, port: port, username: username, password: password, initialCommand: initialCommand)
 
         return scrollView
     }
 
     func updateNSView(_ nsView: NSScrollView, context: Context) {
-        // Ensure text view fills the scroll view width
         if let textView = nsView.documentView as? NSTextView {
-            textView.minSize = NSSize(width: nsView.contentSize.width, height: 0)
-            textView.maxSize = NSSize(width: nsView.contentSize.width, height: CGFloat.greatestFiniteMagnitude)
+            let width = nsView.contentSize.width
+            textView.minSize = NSSize(width: width, height: nsView.contentSize.height)
+            textView.maxSize = NSSize(width: width, height: CGFloat.greatestFiniteMagnitude)
+            textView.textContainer?.containerSize = NSSize(width: width, height: CGFloat.greatestFiniteMagnitude)
+            textView.frame.size.width = width
         }
     }
 
@@ -99,7 +192,6 @@ struct SSHTerminalView: NSViewRepresentable {
             let errorPipe = Pipe()
             let inputPipe = Pipe()
 
-            // Use sshpass if available, otherwise plain ssh
             let sshpassPath = ["/opt/homebrew/bin/sshpass", "/usr/local/bin/sshpass"]
                 .first { FileManager.default.fileExists(atPath: $0) }
 
@@ -128,7 +220,6 @@ struct SSHTerminalView: NSViewRepresentable {
             self.process = process
             self.inputPipe = inputPipe
 
-            // Read output
             outputPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
                 let data = handle.availableData
                 if !data.isEmpty, let str = String(data: data, encoding: .utf8) {
@@ -149,7 +240,6 @@ struct SSHTerminalView: NSViewRepresentable {
 
             do {
                 try process.run()
-                // Send initial command if provided (e.g., virsh console)
                 if let cmd = initialCommand {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
                         self?.sendInput(cmd + "\n")
@@ -182,6 +272,63 @@ struct SSHTerminalView: NSViewRepresentable {
     }
 }
 
+// MARK: - Guest Agent Output View
+
+struct GuestOutputView: NSViewRepresentable {
+    let text: String
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSScrollView()
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = false
+        scrollView.autoresizingMask = [.width, .height]
+        scrollView.borderType = .noBorder
+        scrollView.drawsBackground = true
+        scrollView.backgroundColor = NSColor(red: 0.1, green: 0.1, blue: 0.12, alpha: 1.0)
+
+        let contentSize = scrollView.contentSize
+        let textContainer = NSTextContainer(size: NSSize(width: contentSize.width, height: CGFloat.greatestFiniteMagnitude))
+        textContainer.widthTracksTextView = true
+
+        let layoutManager = NSLayoutManager()
+        layoutManager.addTextContainer(textContainer)
+
+        let textStorage = NSTextStorage()
+        textStorage.addLayoutManager(layoutManager)
+
+        let textView = NSTextView(frame: NSRect(origin: .zero, size: contentSize), textContainer: textContainer)
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.backgroundColor = NSColor(red: 0.1, green: 0.1, blue: 0.12, alpha: 1.0)
+        textView.textColor = .white
+        textView.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        textView.textContainerInset = NSSize(width: 8, height: 8)
+        textView.minSize = NSSize(width: 0, height: contentSize.height)
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+
+        scrollView.documentView = textView
+        return scrollView
+    }
+
+    func updateNSView(_ nsView: NSScrollView, context: Context) {
+        guard let textView = nsView.documentView as? NSTextView else { return }
+        let width = nsView.contentSize.width
+        textView.minSize = NSSize(width: width, height: nsView.contentSize.height)
+        textView.maxSize = NSSize(width: width, height: CGFloat.greatestFiniteMagnitude)
+        textView.textContainer?.containerSize = NSSize(width: width, height: CGFloat.greatestFiniteMagnitude)
+        textView.frame.size.width = width
+
+        let attrStr = NSAttributedString(string: text, attributes: [
+            .foregroundColor: NSColor.white,
+            .font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        ])
+        textView.textStorage?.setAttributedString(attrStr)
+    }
+}
+
 // MARK: - Console Window View
 
 struct VMConsoleView: View {
@@ -194,7 +341,6 @@ struct VMConsoleView: View {
     @State private var isConnected = false
     @State private var sshQuickInfo = false
 
-    // KVM host creds for VNC/virsh
     @State private var kvmHost: String = ""
     @State private var kvmUser: String = "xcobean"
     @State private var kvmPass: String = "Wafula2023"
@@ -202,14 +348,10 @@ struct VMConsoleView: View {
     @State private var vncStatus: String = ""
     @State private var isDiscovering = false
 
-    // VNC Tunnel
-    @State private var vncTunnelActive = false
-    @State private var vncLocalPort = 15900
-    @State private var tunnelProcess: Process?
-
-    // QEMU Guest Agent
     @State private var guestInfo: String = ""
     @State private var isLoadingGuest = false
+    @State private var showGuestCommand = false
+    @State private var guestCommand = ""
 
     enum ConsoleType: String, CaseIterable {
         case vnc = "VNC"
@@ -221,7 +363,6 @@ struct VMConsoleView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Header
             HStack {
                 Image(systemName: vm.state.icon)
                     .foregroundStyle(vm.state.color)
@@ -238,14 +379,13 @@ struct VMConsoleView: View {
                     }
                 }
                 .pickerStyle(.segmented)
-                .frame(width: 220)
+                .frame(width: 340)
             }
             .padding(.horizontal)
             .padding(.vertical, 8)
 
             Divider()
 
-            // Console area
             switch consoleType {
             case .vnc:
                 vncConsole
@@ -259,6 +399,7 @@ struct VMConsoleView: View {
                 webConsole
             }
         }
+        .frame(minWidth: 900, minHeight: 600)
         .frame(width: 1100, height: 750)
         .onAppear {
             discoverVNCDisplay()
@@ -270,8 +411,11 @@ struct VMConsoleView: View {
     @ViewBuilder
     private var vncConsole: some View {
         if isDiscovering {
-            VStack {
-                ProgressView("Discovering VNC display...")
+            VStack(spacing: 12) {
+                ProgressView()
+                    .controlSize(.large)
+                Text("Discovering VNC display...")
+                    .font(.headline)
                 Text("Connecting to KVM host to find VM...")
                     .foregroundStyle(.secondary)
                     .font(.caption)
@@ -289,18 +433,18 @@ struct VMConsoleView: View {
                     .font(.title2.bold())
                     .padding(.top, 8)
 
-                let parts = vncDisplay.split(separator: ":")
-                let host = String(parts.first ?? "")
-                let remotePort = parts.count == 2 ? 5900 + (Int(parts[1]) ?? 0) : 5900
+                let vncParts = vncDisplay.split(separator: ":")
+                let vncHost = String(vncParts.first ?? "")
+                let displayNum = vncParts.count >= 2 ? (Int(String(vncParts.last ?? "0")) ?? 0) : 0
+                let vncPort = 5900 + displayNum
 
-                Text("\(host):\(remotePort)")
+                Text(verbatim: "\(vncHost):\(vncPort)")
                     .font(.title3.monospaced())
                     .foregroundStyle(.secondary)
                     .padding(.top, 4)
 
-                // Direct connection button
                 Button {
-                    openScreenSharing(host: host, port: remotePort)
+                    openScreenSharing(host: vncHost, port: vncPort)
                 } label: {
                     Label("Open in Screen Sharing", systemImage: "display")
                 }
@@ -327,7 +471,9 @@ struct VMConsoleView: View {
                 if !vncStatus.isEmpty {
                     Text(vncStatus)
                         .foregroundStyle(.orange)
-                        .font(.caption)
+                        .font(.callout)
+                        .padding(8)
+                        .background(Color.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: 6))
                 }
 
                 Text("Enter KVM host credentials to discover VNC display")
@@ -355,7 +501,7 @@ struct VMConsoleView: View {
         }
     }
 
-    // MARK: - Serial Console (virsh console via SSH)
+    // MARK: - Serial Console
 
     @ViewBuilder
     private var serialConsole: some View {
@@ -390,7 +536,6 @@ struct VMConsoleView: View {
                 Spacer()
             }
         } else {
-            // SSH to KVM host and run virsh console
             SSHTerminalView(
                 host: kvmHost,
                 username: kvmUser,
@@ -404,9 +549,7 @@ struct VMConsoleView: View {
     // MARK: - VNC Discovery
 
     private func discoverVNCDisplay() {
-        // Try to figure out which host this VM is on
         if kvmHost.isEmpty {
-            // Map hostname to IP
             let hostMap: [String: String] = [
                 "xcbn-paix-cmpt-04": "172.16.3.106",
                 "xcobean-paix-kvm-host-5": "172.16.3.109",
@@ -417,7 +560,6 @@ struct VMConsoleView: View {
             if let ip = hostMap[vm.hostName] {
                 kvmHost = ip
             } else if !vm.hostName.isEmpty {
-                // Try the hostname directly
                 kvmHost = vm.hostName
             } else {
                 vncStatus = "VM has no host assigned (stopped?)"
@@ -434,7 +576,6 @@ struct VMConsoleView: View {
             let sshpassPath = ["/opt/homebrew/bin/sshpass", "/usr/local/bin/sshpass"]
                 .first { FileManager.default.fileExists(atPath: $0) } ?? "/opt/homebrew/bin/sshpass"
 
-            // Direct lookup: get VNC display for this specific VM
             let cmd = instanceName.isEmpty
                 ? "virsh -c qemu:///system list --name | head -1 | xargs -I{} virsh -c qemu:///system vncdisplay {}"
                 : "virsh -c qemu:///system vncdisplay '\(instanceName)'"
@@ -455,7 +596,6 @@ struct VMConsoleView: View {
 
                 let data = pipe.fileHandleForReading.readDataToEndOfFile()
                 let rawOutput = String(data: data, encoding: .utf8) ?? ""
-                // Filter out SSH noise (setlocale warnings, etc.)
                 let display = rawOutput
                     .split(separator: "\n")
                     .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -470,7 +610,7 @@ struct VMConsoleView: View {
                             self.vncDisplay = display
                         }
                     } else {
-                        self.vncStatus = "VNC not available for \(instanceName.isEmpty ? "this VM" : instanceName)\nResponse: \(display)"
+                        self.vncStatus = "VNC not available for \(instanceName.isEmpty ? "this VM" : instanceName)\nResponse: \(rawOutput.prefix(200))"
                     }
                     self.isDiscovering = false
                 }
@@ -488,7 +628,6 @@ struct VMConsoleView: View {
     @ViewBuilder
     private var guestAgentView: some View {
         VStack(spacing: 0) {
-            // Toolbar
             HStack {
                 Text("QEMU Guest Agent")
                     .font(.headline)
@@ -508,11 +647,15 @@ struct VMConsoleView: View {
             Divider()
 
             if isLoadingGuest {
-                VStack {
+                VStack(spacing: 12) {
                     Spacer()
-                    ProgressView("Querying guest agent...")
+                    ProgressView()
+                        .controlSize(.large)
+                    Text("Querying guest agent...")
+                        .foregroundStyle(.secondary)
                     Spacer()
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if guestInfo.isEmpty {
                 VStack(spacing: 16) {
                     Spacer()
@@ -521,7 +664,7 @@ struct VMConsoleView: View {
                         .foregroundStyle(.secondary)
                     Text("QEMU Guest Agent")
                         .font(.title3)
-                    Text("Query VM info and run commands via the QEMU guest agent.\nNo SSH credentials needed — uses the hypervisor's agent channel.")
+                    Text("Query VM info and run commands via the QEMU guest agent.\nNo SSH credentials needed -- uses the hypervisor's agent channel.")
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
 
@@ -534,24 +677,15 @@ struct VMConsoleView: View {
                         .foregroundStyle(.tertiary)
                     Spacer()
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                ScrollView {
-                    Text(guestInfo)
-                        .font(.system(.body, design: .monospaced))
-                        .textSelection(.enabled)
-                        .padding()
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .background(Color(nsColor: NSColor(red: 0.1, green: 0.1, blue: 0.12, alpha: 1.0)))
+                GuestOutputView(text: guestInfo)
             }
         }
         .sheet(isPresented: $showGuestCommand) {
             guestCommandSheet
         }
     }
-
-    @State private var showGuestCommand = false
-    @State private var guestCommand = ""
 
     private var guestCommandSheet: some View {
         VStack(spacing: 16) {
@@ -598,8 +732,13 @@ struct VMConsoleView: View {
         isLoadingGuest = true
         guestInfo = ""
 
-        Task.detached { [kvmHost, kvmUser, kvmPass, vm] in
-            let vmName = await Self.findVirshName(host: kvmHost, user: kvmUser, pass: kvmPass, vmIP: vm.ipAddress)
+        let capturedHost = kvmHost
+        let capturedUser = kvmUser
+        let capturedPass = kvmPass
+        let capturedVM = vm
+
+        Task.detached {
+            let vmName = await Self.findVirshName(host: capturedHost, user: capturedUser, pass: capturedPass, vmIP: capturedVM.ipAddress)
 
             let commands = [
                 ("hostname", "guest-exec", "hostname"),
@@ -612,17 +751,18 @@ struct VMConsoleView: View {
                 ("Processes", "guest-exec", "ps aux --sort=-%mem | head -15"),
             ]
 
-            var output = "═══ Guest Agent Info for \(vm.name) ═══\n"
-            output += "KVM Host: \(kvmHost)\n"
-            output += "virsh name: \(vmName)\n\n"
+            var result = "=== Guest Agent Info for \(capturedVM.name) ===\n"
+            result += "KVM Host: \(capturedHost)\n"
+            result += "virsh name: \(vmName)\n\n"
 
             for (label, _, cmd) in commands {
-                let result = await Self.runOnGuest(host: kvmHost, user: kvmUser, pass: kvmPass, vmName: vmName, command: cmd)
-                output += "── \(label) ──\n\(result)\n\n"
+                let cmdResult = await Self.runOnGuest(host: capturedHost, user: capturedUser, pass: capturedPass, vmName: vmName, command: cmd)
+                result += "-- \(label) --\n\(cmdResult)\n\n"
             }
 
+            let finalResult = result
             await MainActor.run {
-                self.guestInfo = output
+                self.guestInfo = finalResult
                 self.isLoadingGuest = false
             }
         }
@@ -632,42 +772,29 @@ struct VMConsoleView: View {
         guard !kvmHost.isEmpty else { return }
         isLoadingGuest = true
 
-        Task.detached { [kvmHost, kvmUser, kvmPass, vm] in
-            let vmName = await Self.findVirshName(host: kvmHost, user: kvmUser, pass: kvmPass, vmIP: vm.ipAddress)
-            let result = await Self.runOnGuest(host: kvmHost, user: kvmUser, pass: kvmPass, vmName: vmName, command: command)
+        let capturedHost = kvmHost
+        let capturedUser = kvmUser
+        let capturedPass = kvmPass
+        let capturedVM = vm
 
+        Task.detached {
+            let vmName = await Self.findVirshName(host: capturedHost, user: capturedUser, pass: capturedPass, vmIP: capturedVM.ipAddress)
+            let cmdResult = await Self.runOnGuest(host: capturedHost, user: capturedUser, pass: capturedPass, vmName: vmName, command: command)
+
+            let appendStr = "\n-- \(command) --\n\(cmdResult)\n"
             await MainActor.run {
-                self.guestInfo += "\n── \(command) ──\n\(result)\n"
+                self.guestInfo += appendStr
                 self.isLoadingGuest = false
             }
         }
     }
 
-    // Run a command inside a VM via QEMU guest agent (through the KVM host)
     private nonisolated static func runOnGuest(host: String, user: String, pass: String, vmName: String, command: String) async -> String {
         let sshpassPath = ["/opt/homebrew/bin/sshpass", "/usr/local/bin/sshpass"]
             .first { FileManager.default.fileExists(atPath: $0) } ?? "/opt/homebrew/bin/sshpass"
 
-        // Use virsh qemu-agent-command to execute via guest agent
-        let script = """
-        # Try guest-exec first (structured)
-        RESULT=$(virsh -c qemu:///system qemu-agent-command '\(vmName)' '{"execute":"guest-exec","arguments":{"path":"/bin/sh","arg":["-c","\(command.replacingOccurrences(of: "\"", with: "\\\\\""))"],"capture-output":true}}' 2>/dev/null)
-        if [ $? -eq 0 ]; then
-            PID=$(echo "$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin)['return']['pid'])" 2>/dev/null)
-            if [ -n "$PID" ]; then
-                sleep 1
-                STATUS=$(virsh -c qemu:///system qemu-agent-command '\(vmName)' "{\\\"execute\\\":\\\"guest-exec-status\\\",\\\"arguments\\\":{\\\"pid\\\":$PID}}" 2>/dev/null)
-                echo "$STATUS" | python3 -c "
-        import sys,json,base64
-        d=json.load(sys.stdin)['return']
-        if 'out-data' in d: print(base64.b64decode(d['out-data']).decode('utf-8',errors='replace'),end='')
-        if 'err-data' in d: print(base64.b64decode(d['err-data']).decode('utf-8',errors='replace'),end='')
-        " 2>/dev/null
-            fi
-        else
-            echo "Guest agent not available or command failed"
-        fi
-        """
+        let escapedCommand = command.replacingOccurrences(of: "\"", with: "\\\\\"")
+        let script = "RESULT=$(virsh -c qemu:///system qemu-agent-command '\(vmName)' '{\"execute\":\"guest-exec\",\"arguments\":{\"path\":\"/bin/sh\",\"arg\":[\"-c\",\"\(escapedCommand)\"],\"capture-output\":true}}' 2>/dev/null); if [ $? -eq 0 ]; then PID=$(echo \"$RESULT\" | python3 -c \"import sys,json; print(json.load(sys.stdin)['return']['pid'])\" 2>/dev/null); if [ -n \"$PID\" ]; then sleep 1; STATUS=$(virsh -c qemu:///system qemu-agent-command '\(vmName)' \"{\\\\\"execute\\\\\":\\\\\"guest-exec-status\\\\\",\\\\\"arguments\\\\\":{\\\\\"pid\\\\\":$PID}}\" 2>/dev/null); echo \"$STATUS\" | python3 -c \"import sys,json,base64; d=json.load(sys.stdin)['return']; print(base64.b64decode(d.get('out-data','')).decode('utf-8',errors='replace'),end='') if 'out-data' in d else None; print(base64.b64decode(d.get('err-data','')).decode('utf-8',errors='replace'),end='') if 'err-data' in d else None\" 2>/dev/null; fi; else echo 'Guest agent not available or command failed'; fi"
 
         let process = Process()
         let pipe = Pipe()
@@ -689,29 +816,11 @@ struct VMConsoleView: View {
         }
     }
 
-    // Find the virsh domain name for a VM by matching its IP
     private nonisolated static func findVirshName(host: String, user: String, pass: String, vmIP: String) async -> String {
         let sshpassPath = ["/opt/homebrew/bin/sshpass", "/usr/local/bin/sshpass"]
             .first { FileManager.default.fileExists(atPath: $0) } ?? "/opt/homebrew/bin/sshpass"
 
-        let script = """
-        for vm in $(virsh -c qemu:///system list --name 2>/dev/null); do
-            IP=$(virsh -c qemu:///system qemu-agent-command "$vm" '{"execute":"guest-network-get-interfaces"}' 2>/dev/null | python3 -c "
-        import sys,json
-        try:
-            d=json.load(sys.stdin)
-            for iface in d['return']:
-                for addr in iface.get('ip-addresses',[]):
-                    if addr['ip-address-type']=='ipv4' and addr['ip-address']!=('127.0.0.1'):
-                        print(addr['ip-address'])
-        except: pass
-        " 2>/dev/null)
-            if echo "$IP" | grep -q "\(vmIP)"; then
-                echo "$vm"
-                exit 0
-            fi
-        done
-        """
+        let script = "for vm in $(virsh -c qemu:///system list --name 2>/dev/null); do IP=$(virsh -c qemu:///system qemu-agent-command \"$vm\" '{\"execute\":\"guest-network-get-interfaces\"}' 2>/dev/null | python3 -c \"import sys,json; [print(a['ip-address']) for i in json.load(sys.stdin)['return'] for a in i.get('ip-addresses',[]) if a['ip-address-type']=='ipv4' and a['ip-address']!='127.0.0.1']\" 2>/dev/null); if echo \"$IP\" | grep -q \"\(vmIP)\"; then echo \"$vm\"; exit 0; fi; done"
 
         let process = Process()
         let pipe = Pipe()
@@ -741,44 +850,6 @@ struct VMConsoleView: View {
         process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
         process.arguments = ["vnc://\(host):\(port)"]
         try? process.run()
-    }
-
-    // MARK: - VNC Tunnel
-
-    private func openVNCTunnel(host: String, remotePort: Int) {
-        vncLocalPort = 15900 + Int.random(in: 0...99)
-
-        // Use /usr/bin/ssh directly via a shell command with sshpass
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/sh")
-        process.arguments = ["-c",
-            "sshpass -p '\(kvmPass.replacingOccurrences(of: "'", with: "'\\''"))' ssh -N -L \(vncLocalPort):\(host):\(remotePort) -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ExitOnForwardFailure=yes \(kvmUser)@\(kvmHost)"
-        ]
-
-        do {
-            try process.run()
-            tunnelProcess = process
-            vncTunnelActive = true
-
-            // Wait for tunnel to establish, then open Screen Sharing
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-                self.openScreenSharing(host: "localhost", port: self.vncLocalPort)
-            }
-        } catch {
-            vncStatus = "Failed to create tunnel: \(error.localizedDescription)"
-        }
-    }
-
-    private func closeTunnel() {
-        // Kill the forked SSH tunnel by finding the process using the local port
-        let killProcess = Process()
-        killProcess.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-        killProcess.arguments = ["-f", "ssh.*\(vncLocalPort):127.0.0.1"]
-        try? killProcess.run()
-        killProcess.waitUntilExit()
-        tunnelProcess?.terminate()
-        tunnelProcess = nil
-        vncTunnelActive = false
     }
 
     @ViewBuilder
@@ -827,7 +898,7 @@ struct VMConsoleView: View {
                 username: sshUser,
                 password: sshPass,
                 port: Int(sshPort) ?? 22,
-                initialCommand: sshQuickInfo ? "echo '═══ System Info ═══' && hostname && echo '' && echo '── OS ──' && cat /etc/os-release 2>/dev/null | grep PRETTY_NAME | cut -d= -f2 && echo '' && echo '── Uptime ──' && uptime && echo '' && echo '── Memory ──' && free -h 2>/dev/null && echo '' && echo '── Disk ──' && df -h | grep -v tmpfs && echo '' && echo '── CPU ──' && nproc && echo '' && echo '── Network ──' && ip -br addr 2>/dev/null || ifconfig 2>/dev/null && echo '' && echo '── Top Processes ──' && ps aux --sort=-%mem 2>/dev/null | head -10" : nil
+                initialCommand: sshQuickInfo ? "echo '=== System Info ===' && hostname && echo '' && echo '-- OS --' && cat /etc/os-release 2>/dev/null | grep PRETTY_NAME | cut -d= -f2 && echo '' && echo '-- Uptime --' && uptime && echo '' && echo '-- Memory --' && free -h 2>/dev/null && echo '' && echo '-- Disk --' && df -h | grep -v tmpfs && echo '' && echo '-- CPU --' && nproc && echo '' && echo '-- Network --' && ip -br addr 2>/dev/null || ifconfig 2>/dev/null && echo '' && echo '-- Top Processes --' && ps aux --sort=-%mem 2>/dev/null | head -10" : nil
             )
         } else {
             VStack(spacing: 16) {

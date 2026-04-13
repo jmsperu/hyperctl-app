@@ -23,8 +23,41 @@ struct ContentView: View {
                 .listStyle(.sidebar)
             }
         } detail: {
-            detailView
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            VStack(spacing: 0) {
+                // Persistent error banner
+                if let errorMsg = appState.errorMessage {
+                    HStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.white)
+                        Text(errorMsg)
+                            .foregroundStyle(.white)
+                            .lineLimit(2)
+                            .font(.callout)
+                        Spacer()
+                        Button {
+                            Task { await appState.refresh() }
+                        } label: {
+                            Text("Retry")
+                                .font(.callout.bold())
+                                .foregroundStyle(.white)
+                        }
+                        .buttonStyle(.plain)
+                        Button {
+                            appState.errorMessage = nil
+                        } label: {
+                            Image(systemName: "xmark")
+                                .foregroundStyle(.white.opacity(0.8))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(Color.red.opacity(0.85))
+                }
+
+                detailView
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
         }
         .navigationSplitViewStyle(.balanced)
         .toolbar {
@@ -57,17 +90,7 @@ struct ContentView: View {
             EditProfileView(profile: profile)
                 .environmentObject(appState)
         }
-        .alert("Error", isPresented: .init(
-            get: { appState.errorMessage != nil },
-            set: { if !$0 { appState.errorMessage = nil } }
-        )) {
-            Button("Retry") {
-                Task { await appState.refresh() }
-            }
-            Button("Dismiss", role: .cancel) {}
-        } message: {
-            Text(appState.errorMessage ?? "")
-        }
+        // Error alert removed in favor of persistent banner in detail area
         .onAppear {
             if appState.activeProfile != nil {
                 Task { await appState.refresh() }
