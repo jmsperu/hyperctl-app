@@ -41,8 +41,43 @@ struct WebConsoleView: NSViewRepresentable {
 
 class InteractiveTextView: NSTextView {
     var inputHandler: ((String) -> Void)?
+    var keyMonitor: Any?
 
-    override func keyDown(with event: NSEvent) {
+    override var acceptsFirstResponder: Bool { true }
+    override var canBecomeKeyView: Bool { true }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window != nil {
+            setupKeyMonitor()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                self?.window?.makeFirstResponder(self)
+            }
+        } else {
+            removeKeyMonitor()
+        }
+    }
+
+    private func setupKeyMonitor() {
+        removeKeyMonitor()
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown]) { [weak self] event in
+            guard let self = self, self.window != nil, self.window == event.window else {
+                return event
+            }
+            self.handleKeyEvent(event)
+            return nil // consume the event
+        }
+    }
+
+    private func removeKeyMonitor() {
+        if let monitor = keyMonitor {
+            NSEvent.removeMonitor(monitor)
+            keyMonitor = nil
+        }
+    }
+
+    private func handleKeyEvent(_ event: NSEvent) {
+        // Handle Ctrl+key combinations
         if event.modifierFlags.contains(.control), let chars = event.charactersIgnoringModifiers {
             for ch in chars.unicodeScalars {
                 let code = ch.value
@@ -53,11 +88,38 @@ class InteractiveTextView: NSTextView {
                 }
             }
         }
+        // Handle Cmd+V paste
+        if event.modifierFlags.contains(.command), event.charactersIgnoringModifiers == "v" {
+            if let str = NSPasteboard.general.string(forType: .string) {
+                inputHandler?(str)
+            }
+            return
+        }
+        // Arrow keys (no characters, just key codes)
+        switch event.keyCode {
+        case 126: inputHandler?("\u{1b}[A"); return // up
+        case 125: inputHandler?("\u{1b}[B"); return // down
+        case 124: inputHandler?("\u{1b}[C"); return // right
+        case 123: inputHandler?("\u{1b}[D"); return // left
+        default: break
+        }
+        // Regular characters
         if let chars = event.characters, !chars.isEmpty {
             inputHandler?(chars)
-        } else {
-            interpretKeyEvents([event])
         }
+    }
+
+    override func becomeFirstResponder() -> Bool {
+        return true
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        window?.makeFirstResponder(self)
+        super.mouseDown(with: event)
+    }
+
+    override func keyDown(with event: NSEvent) {
+        handleKeyEvent(event)
     }
 
     override func insertText(_ string: Any, replacementRange: NSRange) {
@@ -102,6 +164,10 @@ class InteractiveTextView: NSTextView {
         if let str = NSPasteboard.general.string(forType: .string) {
             inputHandler?(str)
         }
+    }
+
+    deinit {
+        removeKeyMonitor()
     }
 }
 
@@ -160,6 +226,7 @@ struct SSHTerminalView: NSViewRepresentable {
 
         context.coordinator.textView = textView
         textView.inputHandler = { [weak coordinator = context.coordinator] text in
+            NSLog("[HyperCtl] KEY INPUT: %d bytes: %@", text.count, text.debugDescription)
             coordinator?.sendInput(text)
         }
         context.coordinator.startSSH(host: host, port: port, username: username, password: password, initialCommand: initialCommand)
@@ -261,6 +328,7 @@ struct SSHTerminalView: NSViewRepresentable {
         }
 
         func sendInput(_ text: String) {
+            NSLog("[HyperCtl] sendInput called: %d bytes, pipe exists: %@", text.count, inputPipe != nil ? "YES" : "NO")
             if let data = text.data(using: .utf8) {
                 inputPipe?.fileHandleForWriting.write(data)
             }
@@ -333,6 +401,7 @@ struct GuestOutputView: NSViewRepresentable {
 
 struct VMConsoleView: View {
     @EnvironmentObject var appState: AppState
+    @Environment(\.dismiss) private var dismiss
     let vm: VirtualMachine
     @State private var consoleType: ConsoleType = .vnc
     @State private var sshUser: String = "root"
@@ -380,6 +449,14 @@ struct VMConsoleView: View {
                 }
                 .pickerStyle(.segmented)
                 .frame(width: 340)
+
+                Button { dismiss() } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.title2)
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .keyboardShortcut(.cancelAction)
             }
             .padding(.horizontal)
             .padding(.vertical, 8)
